@@ -1,0 +1,92 @@
+name: Build & Release MinRust APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      GODOT_VERSION: "4.3-stable"
+      GODOT_TEMPLATE_DIR: "4.3.stable"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unzip project automatically
+        run: |
+          ZIP_FILE=$(ls -1 *.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found in repository root!"
+            exit 1
+          fi
+          mkdir -p work_project
+          unzip -q -o "$ZIP_FILE" -d work_project
+          PROJ_FILE=$(find work_project -name "project.godot" | head -n 1)
+          if [ -z "$PROJ_FILE" ]; then
+            echo "project.godot not found inside $ZIP_FILE!"
+            exit 1
+          fi
+          echo "PROJ_DIR=$(dirname "$PROJ_FILE")" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate Android Debug Keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey \
+            -keypass android -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -dname "CN=Android Debug,O=Android,C=US" \
+            -validity 9999 -deststoretype pkcs12
+
+      - name: Download Godot 4.3 & Android Export Templates
+        run: |
+          mkdir -p "$HOME/godot" "$HOME/.local/share/godot/export_templates/$GODOT_TEMPLATE_DIR"
+          curl -fSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d "$HOME/godot"
+          mv "$HOME/godot/Godot_v${GODOT_VERSION}_linux.x86_64" "$HOME/godot/godot"
+          chmod +x "$HOME/godot/godot"
+
+          curl -fSL -o /tmp/templates.tpz \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          unzip -q /tmp/templates.tpz -d /tmp/templates_extract
+          mv /tmp/templates_extract/templates/* "$HOME/.local/share/godot/export_templates/$GODOT_TEMPLATE_DIR/"
+
+      - name: Configure Godot Android Settings
+        run: |
+          mkdir -p "$HOME/.config/godot"
+          printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\nexport/android/java_sdk_path = "%s"\nexport/android/android_sdk_path = "%s"\nexport/android/debug_keystore = "%s/.android/debug.keystore"\nexport/android/debug_keystore_user = "androiddebugkey"\nexport/android/debug_keystore_pass = "android"\n' \
+            "$JAVA_HOME" "$ANDROID_HOME" "$HOME" > "$HOME/.config/godot/editor_settings-4.3.tres"
+
+      - name: Import Assets & Export MinRust.apk
+        run: |
+          "$HOME/godot/godot" --headless --path "$PROJ_DIR" --import --quit
+          "$HOME/godot/godot" --headless --path "$PROJ_DIR" --export-debug "Android" "$GITHUB_WORKSPACE/MinRust.apk"
+          ls -lh "$GITHUB_WORKSPACE/MinRust.apk"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MinRust-Android-APK
+          path: MinRust.apk
+          retention-days: 30
+
+      - name: Publish Direct APK Download in Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v1.0-build-${{ github.run_number }}"
+          gh release create "$TAG" "$GITHUB_WORKSPACE/MinRust.apk" \
+            --title "MinRust APK (Build #${{ github.run_number }})" \
+            --notes "Direct Android APK build for MinRust."
